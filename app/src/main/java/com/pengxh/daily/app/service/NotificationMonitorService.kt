@@ -108,22 +108,22 @@ class NotificationMonitorService : NotificationListenerService() {
     private fun handleRemoteCommand(pkg: String, notice: String) {
         if (pkg in auxiliaryApp) {
             when {
-                notice.contains("启动") -> {
+                notice.contains("执行任务") -> {
                     EventBus.getDefault().post(ApplicationEvent.StartDailyTask)
                 }
 
-                notice.contains("停止") -> {
+                notice.contains("终止任务") -> {
                     EventBus.getDefault().post(ApplicationEvent.StopDailyTask)
                 }
 
-                notice.contains("开始循环") -> {
+                notice.contains("开启循环") -> {
                     SaveKeyValues.putValue(Constant.TASK_AUTO_START_KEY, true)
                     sendChannelMessage("循环任务状态通知", "循环任务状态已更新为：开启")
                 }
 
-                notice.contains("暂停循环") -> {
+                notice.contains("关闭循环") -> {
                     SaveKeyValues.putValue(Constant.TASK_AUTO_START_KEY, false)
-                    sendChannelMessage("循环任务状态通知", "循环任务状态已更新为：暂停")
+                    sendChannelMessage("循环任务状态通知", "循环任务状态已更新为：关闭")
                 }
 
                 notice.contains("息屏") -> {
@@ -160,18 +160,19 @@ class NotificationMonitorService : NotificationListenerService() {
                 }
 
                 notice.contains("状态查询") -> {
-                    val type = SaveKeyValues.getValue(Constant.CHANNEL_TYPE_KEY, -1) as Int
+                    val type = SaveKeyValues.getValue(Constant.CHANNEL_TYPE_KEY, 0) as Int
                     val content = buildString {
                         appendLine("任务状态：${if (MainActivity.isTaskStarted) "运行中" else "已停止"}")
+                        appendLine("悬浮权限：${if (MainActivity.isCanDrawOverlay) "已获取" else "被拒绝"}")
                         appendLine("通知监听：${if (listenerConnected) "正常" else "断开"}")
-                        appendLine("截图服务：${if (ProjectionSession.state == ProjectionSession.State.ACTIVE) "正常" else "断开"}")
+                        appendLine("截图服务：${if (ProjectionSession.isStateActive()) "正常" else "断开"}")
                         append("消息渠道：${if (type == 0) "企业微信" else "QQ邮箱"}")
                     }
                     sendChannelMessage("状态查询通知", content)
                 }
 
                 notice.contains("截屏") -> {
-                    if (ProjectionSession.state == ProjectionSession.State.ACTIVE) {
+                    if (ProjectionSession.isStateActive()) {
                         openApplication()
                     } else {
                         sendChannelMessage("截屏状态通知", "截屏服务已断开，截屏失败")
@@ -189,7 +190,7 @@ class NotificationMonitorService : NotificationListenerService() {
     }
 
     private fun sendChannelMessage(title: String, content: String) {
-        val type = SaveKeyValues.getValue(Constant.CHANNEL_TYPE_KEY, -1) as Int
+        val type = SaveKeyValues.getValue(Constant.CHANNEL_TYPE_KEY, 0) as Int
         when (type) {
             0 -> {
                 // 企业微信

@@ -20,6 +20,7 @@ import com.pengxh.daily.app.databinding.ActivitySettingsBinding
 import com.pengxh.daily.app.extensions.notificationEnable
 import com.pengxh.daily.app.extensions.openApplication
 import com.pengxh.daily.app.service.CaptureImageService
+import com.pengxh.daily.app.service.FloatingWindowService
 import com.pengxh.daily.app.service.NotificationMonitorService
 import com.pengxh.daily.app.utils.ApplicationEvent
 import com.pengxh.daily.app.utils.Constant
@@ -37,6 +38,7 @@ import com.pengxh.kt.lite.utils.SaveKeyValues
 import com.pengxh.kt.lite.widget.dialog.BottomActionSheet
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.greenrobot.eventbus.EventBus
 import org.greenrobot.eventbus.Subscribe
@@ -63,11 +65,13 @@ class SettingsActivity : KotlinBaseActivity<ActivitySettingsBinding>() {
         )
     }
     private val channels = arrayListOf("企业微信", "QQ邮箱")
+    private val permissionContract by lazy { ActivityResultContracts.StartActivityForResult() }
     private val notificationContract by lazy { ActivityResultContracts.StartActivityForResult() }
     private val projectionContract by lazy { ActivityResultContracts.StartActivityForResult() }
     private val mpr by lazy { getSystemService(MediaProjectionManager::class.java) }
     private val messageViewModel by lazy { ViewModelProvider(this)[MessageViewModel::class.java] }
     private val emailManager by lazy { EmailManager(this) }
+    private var syncingSwitchState = false
 
     override fun initViewBinding(): ActivitySettingsBinding {
         return ActivitySettingsBinding.inflate(layoutInflater)
@@ -85,7 +89,8 @@ class SettingsActivity : KotlinBaseActivity<ActivitySettingsBinding>() {
     override fun initOnCreate(savedInstanceState: Bundle?) {
         EventBus.getDefault().register(this)
 
-        val index = SaveKeyValues.getValue(Constant.TARGET_APP_KEY, 0) as Int
+        val index = (SaveKeyValues.getValue(Constant.TARGET_APP_KEY, 0) as Int)
+            .coerceIn(0, icons.lastIndex)
         binding.iconView.setBackgroundResource(icons[index])
 
         binding.appVersion.text = BuildConfig.VERSION_NAME
@@ -121,13 +126,15 @@ class SettingsActivity : KotlinBaseActivity<ActivitySettingsBinding>() {
             }
 
             is ApplicationEvent.ProjectionFailed -> {
-                "截屏服务启动失败，请重试".show(this)
+                "截屏服务已断开，已切换到通知模式".show(this)
                 binding.captureSwitch.isChecked = false
+                binding.captureRadioButton.isChecked = false
+                binding.noticeRadioButton.isChecked = true
                 binding.captureTipsView.visibility = View.VISIBLE
             }
 
             is ApplicationEvent.CaptureCompleted -> {
-                val type = SaveKeyValues.getValue(Constant.CHANNEL_TYPE_KEY, -1) as Int
+                val type = SaveKeyValues.getValue(Constant.CHANNEL_TYPE_KEY, 0) as Int
                 when (type) {
                     0 -> {
                         // 企业微信
@@ -247,11 +254,33 @@ class SettingsActivity : KotlinBaseActivity<ActivitySettingsBinding>() {
             navigatePageTo<TaskConfigActivity>()
         }
 
+        binding.floatingSwitch.setOnClickListener {
+            if (Settings.canDrawOverlays(this)) {
+                "核心服务，无法关闭".show(this)
+                binding.floatingSwitch.isChecked = true
+                return@setOnClickListener
+            }
+            val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+            overlayPermissionLauncher.launch(intent)
+        }
+
         binding.noticeSwitch.setOnClickListener {
-            notificationSettingLauncher.launch(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            if (notificationEnable()) {
+                "核心服务，无法关闭".show(this)
+                binding.noticeSwitch.isChecked = true
+                return@setOnClickListener
+            }
+            val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+            notificationSettingLauncher.launch(intent)
         }
 
         binding.captureSwitch.setOnClickListener {
+            if (ProjectionSession.isStateActive()) {
+                "核心服务，无法关闭".show(this)
+                binding.captureSwitch.isChecked = true
+                return@setOnClickListener
+            }
+            binding.captureSwitch.isChecked = false
             projectionLauncher.launch(mpr.createScreenCaptureIntent())
         }
 
@@ -266,7 +295,7 @@ class SettingsActivity : KotlinBaseActivity<ActivitySettingsBinding>() {
             }
 
             // 再次确认 session 实际状态
-            if (ProjectionSession.state != ProjectionSession.State.ACTIVE) {
+            if (!ProjectionSession.isStateActive()) {
                 binding.captureSwitch.isChecked = false
                 "截屏授权已失效，请重新授权".show(this)
                 return@setOnClickListener
@@ -275,15 +304,42 @@ class SettingsActivity : KotlinBaseActivity<ActivitySettingsBinding>() {
         }
 
         binding.gestureDetectSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (syncingSwitchState) {
+                return@setOnCheckedChangeListener
+            }
             SaveKeyValues.putValue(Constant.GESTURE_DETECTOR_KEY, isChecked)
         }
 
         binding.backToHomeSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (syncingSwitchState) {
+                return@setOnCheckedChangeListener
+            }
             SaveKeyValues.putValue(Constant.BACK_TO_HOME_KEY, isChecked)
+        }
+
+        binding.powerSaveSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (syncingSwitchState) {
+                return@setOnCheckedChangeListener
+            }
+            SaveKeyValues.putValue(Constant.POWER_SAVE_MODE_KEY, isChecked)
         }
 
         binding.introduceLayout.setOnClickListener {
             navigatePageTo<QuestionAndAnswerActivity>()
+        }
+    }
+
+    private val overlayPermissionLauncher = registerForActivityResult(permissionContract) {
+        if (Settings.canDrawOverlays(this)) {
+            Intent(this, FloatingWindowService::class.java).apply {
+                startService(this)
+            }
+        }
+    }
+
+    private val notificationSettingLauncher = registerForActivityResult(notificationContract) {
+        if (notificationEnable()) {
+            turnOnNotificationMonitorService()
         }
     }
 
@@ -298,7 +354,7 @@ class SettingsActivity : KotlinBaseActivity<ActivitySettingsBinding>() {
             return@registerForActivityResult
         }
 
-        if (ProjectionSession.state == ProjectionSession.State.ACTIVE) {
+        if (ProjectionSession.isStateActive()) {
             Log.d(kTag, "MediaProjection already active, skipping creation")
             return@registerForActivityResult
         }
@@ -310,15 +366,19 @@ class SettingsActivity : KotlinBaseActivity<ActivitySettingsBinding>() {
         }
     }
 
-    private val notificationSettingLauncher = registerForActivityResult(notificationContract) {
-        if (notificationEnable()) {
-            turnOnNotificationMonitorService()
-        }
-    }
-
     override fun onResume() {
         super.onResume()
-        val type = SaveKeyValues.getValue(Constant.CHANNEL_TYPE_KEY, -1) as Int
+        if (Settings.canDrawOverlays(this)) {
+            binding.floatingSwitch.isChecked = true
+            binding.floatingTipsView.visibility = View.GONE
+
+        } else {
+            binding.floatingSwitch.isChecked = false
+            binding.floatingTipsView.visibility = View.VISIBLE
+            binding.floatingTipsView.text = "服务未开启，打完卡无法自动跳回本软件"
+        }
+
+        val type = SaveKeyValues.getValue(Constant.CHANNEL_TYPE_KEY, 0) as Int
         if (type in 0..channels.lastIndex) {
             binding.channelView.text = channels[type]
             binding.channelView.setTextColor(R.color.theme_color.convertColor(this))
@@ -327,24 +387,34 @@ class SettingsActivity : KotlinBaseActivity<ActivitySettingsBinding>() {
             binding.channelView.setTextColor(R.color.red.convertColor(this))
         }
 
-        val resultSource = SaveKeyValues.getValue(Constant.RESULT_SOURCE_KEY, -1) as Int
-        if (resultSource == 0) {
+        val sourceType = SaveKeyValues.getValue(Constant.RESULT_SOURCE_KEY, 0) as Int
+        if (sourceType == 0) {
             binding.noticeRadioButton.isChecked = true
             binding.captureRadioButton.isChecked = false
         } else {
-            if (ProjectionSession.state == ProjectionSession.State.ACTIVE) {
+            // == 1
+            if (ProjectionSession.isStateActive()) {
                 binding.captureRadioButton.isChecked = true
                 binding.noticeRadioButton.isChecked = false
             } else {
                 binding.captureRadioButton.isChecked = false
                 binding.noticeRadioButton.isChecked = true
+                SaveKeyValues.putValue(Constant.RESULT_SOURCE_KEY, 0)
+                Log.w(kTag, "截屏服务未运行，已自动切换到通知模式")
             }
         }
 
-        binding.gestureDetectSwitch.isChecked =
-            SaveKeyValues.getValue(Constant.GESTURE_DETECTOR_KEY, true) as Boolean
-        binding.backToHomeSwitch.isChecked =
-            SaveKeyValues.getValue(Constant.BACK_TO_HOME_KEY, true) as Boolean
+        syncingSwitchState = true
+        try {
+            binding.gestureDetectSwitch.isChecked =
+                SaveKeyValues.getValue(Constant.GESTURE_DETECTOR_KEY, true) as Boolean
+            binding.backToHomeSwitch.isChecked =
+                SaveKeyValues.getValue(Constant.BACK_TO_HOME_KEY, true) as Boolean
+            binding.powerSaveSwitch.isChecked =
+                SaveKeyValues.getValue(Constant.POWER_SAVE_MODE_KEY, false) as Boolean
+        } finally {
+            syncingSwitchState = false
+        }
 
         if (notificationEnable()) {
             binding.noticeTipsView.text = "服务状态查询中，请稍后..."
@@ -363,7 +433,7 @@ class SettingsActivity : KotlinBaseActivity<ActivitySettingsBinding>() {
             binding.noticeTipsView.visibility = View.VISIBLE
         }
 
-        if (ProjectionSession.state == ProjectionSession.State.ACTIVE) {
+        if (ProjectionSession.isStateActive()) {
             binding.captureSwitch.isChecked = true
             binding.captureTipsView.visibility = View.GONE
         } else {
@@ -377,18 +447,19 @@ class SettingsActivity : KotlinBaseActivity<ActivitySettingsBinding>() {
     private fun turnOnNotificationMonitorService() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val componentName = ComponentName(context, NotificationMonitorService::class.java)
+                if (!isActive) return@launch
 
-                // 检查当前组件状态
+                val componentName = ComponentName(context, NotificationMonitorService::class.java)
                 val currentState = context.packageManager.getComponentEnabledSetting(componentName)
+
                 if (currentState == PackageManager.COMPONENT_ENABLED_STATE_ENABLED) {
-                    // 如果已经启用，先禁用
                     context.packageManager.setComponentEnabledSetting(
                         componentName,
                         PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
                         PackageManager.DONT_KILL_APP
                     )
                     delay(500) // 短暂延迟
+                    if (!isActive) return@launch
                 }
 
                 // 重新启用
