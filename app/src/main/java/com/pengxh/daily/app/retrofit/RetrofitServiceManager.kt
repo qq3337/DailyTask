@@ -27,12 +27,22 @@ object RetrofitServiceManager {
             .toRequestBody("application/json; charset=utf-8".toMediaType())
 
         val keyMap = HashMap<String, String>()
-        keyMap["key"] = SaveKeyValues.getValue(Constant.WX_WEB_HOOK_KEY, "") as String
-        return api.sendMessage(requestBody, keyMap)
+        keyMap["key"] = SaveKeyValues.loadString(Constant.WX_WEB_HOOK_KEY, "")
+        return api.sendMessage(requestBody, keyMap).string()
     }
 
     suspend fun sendImageMessage(imagePath: String): String {
-        val imageBytes = File(imagePath).readBytes()
+        val file = File(imagePath)
+        // 微信群机器人图片消息限制 2MB
+        val maxBytes = 2 * 1024 * 1024L
+        if (!file.exists()) {
+            return sendMessage("截图发送失败：图片文件不存在")
+        }
+        if (file.length() > maxBytes) {
+            return sendMessage("截图发送失败：图片超过2MB限制（当前 ${file.length() / 1024}KB），请截图后手动查看")
+        }
+
+        val imageBytes = file.readBytes()
 
         // 计算 Base64
         val base64 = Base64.getEncoder().encodeToString(imageBytes)
@@ -53,7 +63,7 @@ object RetrofitServiceManager {
             .toRequestBody("application/json; charset=utf-8".toMediaType())
 
         val keyMap = HashMap<String, String>()
-        keyMap["key"] = SaveKeyValues.getValue(Constant.WX_WEB_HOOK_KEY, "") as String
-        return api.sendMessage(requestBody, keyMap)
+        keyMap["key"] = SaveKeyValues.loadString(Constant.WX_WEB_HOOK_KEY, "")
+        return api.sendMessage(requestBody, keyMap).string()
     }
 }
